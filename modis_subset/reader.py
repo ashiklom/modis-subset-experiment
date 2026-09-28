@@ -30,16 +30,19 @@ def chunk_grid_index(v: VarRef, chunk):
     return chunk.index
 
 
-def read(src: Source, v: VarRef, rows: slice | None = None) -> np.ndarray:
-    """Read variable ``v`` (native dtype, no scaling).
+def read_many(src: Source, vs, rows: slice | None = None) -> list[np.ndarray]:
+    """Like :func:`read` for several variables, with one batched request."""
+    plans = [_plan(v, rows) for v in vs]
+    flat = [c for _, sel, _ in plans for _, c in sel]
+    bufs = iter(src.get_ranges([c.offset for c in flat], [c.length for c in flat]))
+    out = []
+    for v, (rr, sel, _) in zip(vs, plans):
+        out.append(_assemble(v, rr, sel, [next(bufs) for _ in sel]))
+    return out
 
-    ``rows`` restricts the read along the first axis *if* the variable is
-    chunked along that axis, only the chunks intersecting ``rows`` are fetched.
-    For single-block variables the whole block is fetched and decompressed.
-    """
-    shape = v.shape
-    cshape = v.chunk_shape
-    dtype = np.dtype(v.dtype)
+
+def _plan(v: VarRef, rows):
+    shape, cshape = v.shape, v.chunk_shape
     r0, r1 = (0, shape[0]) if rows is None else (rows.start or 0, rows.stop if rows.stop is not None else shape[0])
     r0, r1 = max(0, r0), min(shape[0], r1)
     sel = []
@@ -48,13 +51,18 @@ def read(src: Source, v: VarRef, rows: slice | None = None) -> np.ndarray:
         lo = idx[0] * cshape[0]
         if lo < r1 and lo + cshape[0] > r0:
             sel.append((idx, c))
-    bufs = src.get_ranges([c.offset for _, c in sel], [c.length for _, c in sel])
+    return (r0, r1), sel, None
+
+
+def _assemble(v: VarRef, rr, sel, bufs):
+    shape, cshape = v.shape, v.chunk_shape
+    dtype = np.dtype(v.dtype)
+    r0, r1 = rr
     out_shape = (r1 - r0,) + tuple(shape[1:])
     fill = v.attrs.get("_FillValue", 0)
     out = np.full(out_shape, fill if np.isscalar(fill) else 0, dtype=dtype.newbyteorder("="))
     for (idx, c), b in zip(sel, bufs):
         blk = _decode(b, c.compressed, dtype, cshape)
-        # place block
         dst, srcs = [], []
         for ax, (i, cs, n) in enumerate(zip(idx, cshape, shape)):
             lo, hi = i * cs, min((i + 1) * cs, n)
@@ -67,6 +75,16 @@ def read(src: Source, v: VarRef, rows: slice | None = None) -> np.ndarray:
                 srcs.append(slice(0, hi - lo))
         out[tuple(dst)] = blk[tuple(srcs)]
     return out
+
+
+def read(src: Source, v: VarRef, rows: slice | None = None) -> np.ndarray:
+    """Read variable ``v`` (native dtype, no scaling).
+
+    ``rows`` restricts the read along the first axis: if the variable is
+    chunked along that axis, only the chunks intersecting ``rows`` are fetched.
+    For single-block variables the whole block is fetched and decompressed.
+    """
+    return read_many(src, [v], rows)[0]
 
 
 def scale(v: VarRef, a: np.ndarray) -> np.ndarray:

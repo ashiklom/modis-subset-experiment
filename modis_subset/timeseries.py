@@ -119,8 +119,7 @@ def _one(p: cmr.Granule, g: cmr.Granule | None, variables, lat, lon, strategy,
             pr, _, _ = orbit.predict(p.polygon, p.day_night, lat, lon, nrows=gl.shape[0])
             h = locate.window(gdata, gl, gn, lat, lon, pr, half_scans=4)
         elif strategy in ("brute", "index_window"):
-            la = reader.read(gdata, gl)
-            lo = reader.read(gdata, gn)
+            la, lo = reader.read_many(gdata, [gl, gn])
             i, j, d = geo.nearest(la, lo, lat, lon)
             h = locate.Hit(i, j, d, scans_read=gl.shape[0] // 10)
             if strategy == "index_window":

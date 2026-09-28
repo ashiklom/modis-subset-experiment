@@ -9,12 +9,16 @@ import time
 
 import pandas as pd
 
-from modis_subset import cmr, timeseries
+from modis_subset import cmr, io, timeseries
 from modis_subset.io import STATS
 
 LAT, LON = 41.31, -72.92
 S, E = "2024-01-01", "2024-01-31T23:59:59"
 WORKERS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+SIGNED = "--signed" in sys.argv
+TAG = f"w{WORKERS}{'_signed' if SIGNED else ''}"
+if SIGNED:
+    io.enable_signed_urls("cache/remote/signed_urls.json")
 REFS_A, REFS_B, IDX = "cache/remote/refs_a", "cache/remote/refs_b", "cache/remote/index"
 shutil.rmtree("cache/remote", ignore_errors=True)
 
@@ -33,7 +37,7 @@ runs = [
     ("warm  interp5km", "interp5km", REFS_B),
 ]
 out = []
-print(f"CMR search+pairing: {t_cmr:.1f}s for {len(pairs)} granules; workers={WORKERS}")
+print(f"CMR search+pairing: {t_cmr:.1f}s for {len(pairs)} granules; workers={WORKERS} signed={SIGNED}")
 for label, strat, refs in runs:
     STATS.reset()
     t = time.perf_counter()
@@ -47,7 +51,7 @@ for label, strat, refs in runs:
              exact=round(((m.row == m.row_t) & (m.col == m.col_t)).mean(), 3))
     out.append(r)
     print(r, flush=True)
-    df.to_csv(f"data/remote_{strat}_{'warm' if 'warm' in label else 'cold'}.csv", index=False)
+    df.to_csv(f"data/remote_{TAG}_{strat}_{'warm' if 'warm' in label else 'cold'}.csv", index=False)
 res = pd.DataFrame(out)
-res.to_csv("data/bench_remote.csv", index=False)
+res.to_csv(f"data/bench_remote_{TAG}.csv", index=False)
 print(res.to_markdown(index=False))

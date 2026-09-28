@@ -8,13 +8,16 @@ the bytes live.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+import urllib.error
+import urllib.request
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import obstore
 from obstore.store import HTTPStore, LocalStore
@@ -65,6 +68,75 @@ def http_store(base_url: str) -> HTTPStore:
 
 
 # --------------------------------------------------------------------------
+# Signed-URL cache
+# --------------------------------------------------------------------------
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+class SignedURLCache:
+    """Remember the pre-signed CloudFront URL that LAADS redirects to.
+
+    Every request to ``data.laadsdaac.earthdatacloud.nasa.gov`` answers with a
+    303 to a signed CloudFront URL (valid ~1 h, see its ``Expires``), so each
+    range read costs two round trips.  Resolving the redirect once per file and
+    pointing an obstore HTTPStore at the signed URL removes one of them.  The
+    redirect is resolved with urllib (obstore cannot report a redirect target);
+    all data bytes still go through obstore.  Persisted to a small JSON file so
+    that it also helps across processes.
+    """
+
+    def __init__(self, path="cache/signed_urls.json", margin_s=300):
+        self.path = Path(path)
+        self.margin = margin_s
+        self.lock = threading.Lock()
+        try:
+            self.urls = json.loads(self.path.read_text())
+        except (FileNotFoundError, ValueError):
+            self.urls = {}
+
+    def _valid(self, signed):
+        exp = parse_qs(urlsplit(signed).query).get("Expires")
+        return bool(exp) and int(exp[0]) > time.time() + self.margin
+
+    def get(self, url):
+        with self.lock:
+            signed = self.urls.get(url)
+        if signed and self._valid(signed):
+            return signed
+        t = time.perf_counter()
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {edl_token()}", "Range": "bytes=0-0"})
+        try:
+            urllib.request.build_opener(_NoRedirect).open(req, timeout=60).close()
+            signed = None  # no redirect: serve directly
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            signed = e.headers["Location"]
+        STATS.add(1, 0, time.perf_counter() - t)
+        with self.lock:
+            self.urls[url] = signed
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.urls))
+        return signed
+
+
+SIGNED = None  # set to a SignedURLCache() to enable (see enable_signed_urls)
+
+
+def enable_signed_urls(path="cache/signed_urls.json"):
+    global SIGNED
+    SIGNED = SignedURLCache(path)
+
+
+@lru_cache(maxsize=4096)
+def _signed_store(signed_url: str) -> HTTPStore:
+    return HTTPStore.from_url(signed_url, client_options={"timeout": "300s"})
+
+
+# --------------------------------------------------------------------------
 # Byte sources
 # --------------------------------------------------------------------------
 @dataclass
@@ -105,6 +177,10 @@ class Source:
             self.store = http_store(f"{parts.scheme}://{parts.netloc}/{first}")
             self.path = rest
             self.remote = True
+            if SIGNED is not None:
+                signed = SIGNED.get(self.url)
+                if signed:
+                    self.store, self.path = _signed_store(signed), ""
         else:
             p = Path(self.url).resolve()
             self.store = _local_store(str(p.parent))

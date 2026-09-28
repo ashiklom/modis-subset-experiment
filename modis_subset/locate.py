@@ -39,8 +39,7 @@ class Hit:
 
 
 def brute(src: Source, lat: VarRef, lon: VarRef, plat, plon) -> Hit:
-    la = reader.read(src, lat)
-    lo = reader.read(src, lon)
+    la, lo = reader.read_many(src, [lat, lon])
     i, j, d = geo.nearest(la, lo, plat, plon)
     return Hit(i, j, d, scans_read=lat.shape[0] // ROWS_PER_SCAN)
 
@@ -62,9 +61,7 @@ def window(src: Source, lat: VarRef, lon: VarRef, plat, plon, prior_row: float,
         need = [s for s in range(a, b) if s not in cache]
         if not need:
             return
-        # contiguous runs -> one read() each, but issue them together
-        la = reader.read(src, lat, rows=slice(need[0] * 10, (need[-1] + 1) * 10))
-        lo_ = reader.read(src, lon, rows=slice(need[0] * 10, (need[-1] + 1) * 10))
+        la, lo_ = reader.read_many(src, [lat, lon], rows=slice(need[0] * 10, (need[-1] + 1) * 10))
         for s in need:
             r = (s - need[0]) * 10
             cache[s] = (la[r:r + 10], lo_[r:r + 10])
@@ -124,9 +121,17 @@ def interp_5km_to_1km(lat5, lon5, ncols=1354):
     return lat, lon
 
 
-def interp5km(src: Source, lat5: VarRef, lon5: VarRef, plat, plon) -> Hit:
-    la5 = reader.read(src, lat5)
-    lo5 = reader.read(src, lon5)
-    la, lo = interp_5km_to_1km(la5, lo5)
-    i, j, d = geo.nearest(la, lo, plat, plon)
+def interp5km(src: Source, lat5: VarRef, lon5: VarRef, plat, plon, half_scans=2) -> Hit:
+    """Nearest 1 km pixel from the product's own 5 km geolocation.
+
+    Coarse nearest on the 5 km samples first, then 5 km -> 1 km interpolation
+    of only the scans around it (+-``half_scans``).
+    """
+    la5, lo5 = reader.read_many(src, [lat5, lon5])
+    i5, _, _ = geo.nearest(la5, lo5, plat, plon)
+    nscan = la5.shape[0] // 2
+    k = i5 // 2
+    s0, s1 = max(0, k - half_scans), min(nscan, k + half_scans + 1)
+    la, lo = interp_5km_to_1km(la5[2 * s0:2 * s1], lo5[2 * s0:2 * s1])
+    i, j, d = geo.nearest(la, lo, plat, plon, row0=10 * s0)
     return Hit(i, j, d)
