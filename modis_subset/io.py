@@ -197,7 +197,10 @@ class Source:
 
     def size(self) -> int:
         if self._size is None:
-            self._size = obstore.head(self.store, self.path)["size"]
+            # a 1-byte ranged GET instead of HEAD: pre-signed CloudFront URLs
+            # are signed for GET only
+            r = obstore.get(self.store, self.path, options={"range": {"offset": 0, "length": 1}})
+            self._size = r.meta["size"]
         return self._size
 
     def get_range(self, start: int, length: int) -> bytes:
