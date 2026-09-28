@@ -131,8 +131,11 @@ class _Scanner(kh.HDF4ToZarr):
             elif t == "SD":
                 sd_ref = r
         out.chunk_shape = out.shape
-        info = self.tags[("SD", sd_ref)]
-        if info["extended"]:
+        info = self.tags.get(("SD", sd_ref))
+        if info is None:
+            # SDS declared but never written: no data, all fill value
+            out.chunks = []
+        elif info["extended"]:
             self.f.seek(info["offset"])
             data = self._dec_extended()
             if isinstance(data, tuple):  # ("DEFLATE", offset, length)

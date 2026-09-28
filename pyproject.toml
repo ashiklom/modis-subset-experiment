@@ -30,3 +30,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["modis_subset"]
+
+[dependency-groups]
+dev = [
+    "tabulate>=0.10.0",
+]

@@ -50,7 +50,8 @@ def read(src: Source, v: VarRef, rows: slice | None = None) -> np.ndarray:
             sel.append((idx, c))
     bufs = src.get_ranges([c.offset for _, c in sel], [c.length for _, c in sel])
     out_shape = (r1 - r0,) + tuple(shape[1:])
-    out = np.zeros(out_shape, dtype=dtype.newbyteorder("="))
+    fill = v.attrs.get("_FillValue", 0)
+    out = np.full(out_shape, fill if np.isscalar(fill) else 0, dtype=dtype.newbyteorder("="))
     for (idx, c), b in zip(sel, bufs):
         blk = _decode(b, c.compressed, dtype, cshape)
         # place block
@@ -83,3 +84,53 @@ def scale(v: VarRef, a: np.ndarray) -> np.ndarray:
     sf = v.attrs.get("scale_factor", 1.0)
     off = v.attrs.get("add_offset", 0.0)
     return sf * (a - off)
+
+
+def read_points(src: Source, v: VarRef, indices, first_fetch_margin=1.15,
+                min_fetch=1 << 16) -> np.ndarray:
+    """Values of ``v`` at a list of full index tuples, touching as little of
+    the compressed stream as possible.
+
+    zlib is a stream, so element ``e`` of a single-block variable only needs
+    the compressed prefix that decodes to ``(e + 1) * itemsize`` bytes.  We
+    guess that prefix from the block's average compression ratio, fetch it,
+    and fetch more (doubling) only if it was not enough.  For a MOD35
+    ``Cloud_Mask[0, row, col]`` this is on average ~1/12 of the block.
+
+    Chunked variables fall back to reading only the chunk(s) involved.
+    """
+    idx = [tuple(int(i) for i in t) for t in indices]
+    dtype = np.dtype(v.dtype)
+    if len(v.chunks) != 1 or not v.chunks[0].compressed:
+        out = []
+        for t in idx:
+            a = read(src, v, rows=slice(t[0], t[0] + 1))
+            out.append(a[(0,) + t[1:]])
+        return np.array(out, dtype=dtype.newbyteorder("="))
+    c = v.chunks[0]
+    flat = np.ravel_multi_index(np.array(idx).T, v.shape)
+    need = int((flat.max() + 1) * dtype.itemsize)
+    total = int(np.prod(v.shape)) * dtype.itemsize
+    guess = int(need / total * c.length * first_fetch_margin) + min_fetch
+    d = zlib.decompressobj()
+    got, pos, fetch = [], 0, min(c.length, guess)
+    have = 0
+    while have < need:
+        if pos >= c.length:
+            raise ValueError("compressed stream ended early")
+        n = min(fetch, c.length - pos)
+        part = src.get_range(c.offset + pos, n)
+        pos += n
+        chunk = d.decompress(d.unconsumed_tail + part, need - have)
+        got.append(chunk)
+        have += len(chunk)
+        fetch = max(fetch, min_fetch) * 2
+    buf = b"".join(got)[:need]
+    a = np.frombuffer(buf, dtype=dtype)
+    return a[flat].astype(dtype.newbyteorder("="))
+
+
+def point_fraction_read(v: VarRef, indices) -> float:
+    """Rough fraction of the compressed block needed for ``read_points``."""
+    flat = np.ravel_multi_index(np.array([tuple(t) for t in indices]).T, v.shape)
+    return float((flat.max() + 1) / np.prod(v.shape))
