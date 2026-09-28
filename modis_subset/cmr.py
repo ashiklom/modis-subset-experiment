@@ -23,6 +23,7 @@ class Granule:
     eq_time: datetime | None # equator crossing time
     day_night: str | None
     size_mb: float | None
+    polygon: list | None = None  # [(lon, lat), ...] CMR GPolygon (granule corners)
 
     @property
     def name(self):
@@ -57,8 +58,18 @@ def _parse(g) -> Granule | None:
         eq_lon=orb.get("EquatorCrossingLongitude"),
         eq_time=_dt(orb.get("EquatorCrossingDateTime")),
         day_night=umm.get("DataGranule", {}).get("DayNightFlag"),
-        size_mb=g.size(),
+        size_mb=g["size"] if "size" in g else None,
+        polygon=_polygon(umm),
     )
+
+
+def _polygon(umm):
+    try:
+        geom = umm["SpatialExtent"]["HorizontalSpatialDomain"]["Geometry"]
+        pts = geom["GPolygons"][0]["Boundary"]["Points"]
+        return [(p["Longitude"], p["Latitude"]) for p in pts]
+    except (KeyError, IndexError):
+        return None
 
 
 def search(short_name, lat, lon, start, end, version="6.1"):

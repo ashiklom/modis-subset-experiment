@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=2.4.6",
     "obstore>=0.11.1",
     "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
     "pyhdf>=0.11.7",
     "pyproj>=3.7.2",
     "s2sphere>=0.2.5",
